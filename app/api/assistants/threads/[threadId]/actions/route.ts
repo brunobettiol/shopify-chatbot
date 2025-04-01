@@ -17,7 +17,7 @@ export async function OPTIONS() {
 
 export async function POST(
   request: Request,
-  { params }: { params: { threadId: string } }
+  { params }: { params: Record<string, string> }
 ) {
   try {
     const { threadId } = params;
