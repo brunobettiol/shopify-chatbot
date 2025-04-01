@@ -19,7 +19,7 @@ export async function OPTIONS() {
 
 export async function POST(
   request: Request,
-  { params }: { params: { threadId: string } }
+  { params }: { params: Record<string, string> }
 ) {
   try {
     const { threadId } = params;
@@ -65,7 +65,7 @@ export async function POST(
           console.error("Error reading assistant stream:", err);
           controller.error(err);
         } finally {
-          // Parse the accumulated data (assumed NDJSON) to extract assistant text
+          // Parse the accumulated NDJSON data to extract assistant text
           let assistantText = "";
           try {
             const lines = fullResponseData.split("\n").filter(line => line.trim() !== "");

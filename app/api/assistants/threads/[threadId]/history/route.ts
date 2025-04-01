@@ -16,7 +16,7 @@ export async function OPTIONS() {
 
 export async function GET(
   request: Request,
-  { params }: { params: { threadId: string } }
+  { params }: { params: Record<string, string> }
 ) {
   const { threadId } = params;
   const history = getHistory(threadId);
@@ -42,7 +42,7 @@ export async function GET(
 
 export async function DELETE(
   request: Request,
-  { params }: { params: { threadId: string } }
+  { params }: { params: Record<string, string> }
 ) {
   const { threadId } = params;
   const history = getHistory(threadId);
