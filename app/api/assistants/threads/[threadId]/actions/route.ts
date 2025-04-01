@@ -2,10 +2,8 @@ import openai from 'app/openai';
 import { NextResponse } from 'next/server';
 import { appendMessage } from '../../sessionStore';
 
-const assistantId: string = process.env.OPENAI_ASSISTANT_ID ?? 'default_assistant_id';
 const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
 
-// Preflight handler for CORS
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 200,
@@ -20,20 +18,11 @@ export async function OPTIONS() {
 export async function POST(request: Request, context: { params: Record<string, string> }) {
   const { threadId } = context.params;
   try {
-    const { content } = await request.json();
+    const { toolCallOutputs, runId } = await request.json();
 
-    // Save the user's message to the session history
-    appendMessage(threadId, 'user', content);
-
-    // Create a new message in the thread (send the user message to OpenAI)
-    await openai.beta.threads.messages.create(threadId, {
-      role: "user",
-      content,
-    });
-
-    // Start the streaming response for the assistant's reply
-    const stream = openai.beta.threads.runs.stream(threadId, {
-      assistant_id: assistantId,
+    // Submit tool outputs and obtain a streaming response from OpenAI
+    const stream = openai.beta.threads.runs.submitToolOutputsStream(threadId, runId, {
+      tool_outputs: toolCallOutputs
     });
 
     let readable: ReadableStream<any>;
@@ -43,7 +32,6 @@ export async function POST(request: Request, context: { params: Record<string, s
       readable = (stream as unknown) as ReadableStream<any>;
     }
 
-    // Intercept the stream to accumulate the assistant's full response
     const decoder = new TextDecoder();
     let fullResponseData = "";
     const reader = readable.getReader();
@@ -59,10 +47,10 @@ export async function POST(request: Request, context: { params: Record<string, s
           }
           controller.close();
         } catch (err) {
-          console.error("Error reading assistant stream:", err);
+          console.error("Error reading assistant stream (tool output):", err);
           controller.error(err);
         } finally {
-          // Parse the accumulated NDJSON data to extract assistant text
+          // Parse the accumulated NDJSON response to extract assistant text
           let assistantText = "";
           try {
             const lines = fullResponseData.split("\n").filter(line => line.trim() !== "");
@@ -80,9 +68,9 @@ export async function POST(request: Request, context: { params: Record<string, s
               }
             }
           } catch (parseError) {
-            console.error("Error parsing assistant response data:", parseError);
+            console.error("Error parsing assistant response (tool output):", parseError);
           }
-          // Save the full assistant reply to session history
+          // Save the assistant's reply from the tool output to session history
           if (assistantText) {
             appendMessage(threadId, 'assistant', assistantText);
           }
@@ -98,7 +86,7 @@ export async function POST(request: Request, context: { params: Record<string, s
       }
     });
   } catch (error: any) {
-    console.error('Error in POST /messages:', error);
+    console.error('Error in POST /actions:', error);
     return new NextResponse(JSON.stringify({ error: error.message }), {
       status: 500,
       headers: {
