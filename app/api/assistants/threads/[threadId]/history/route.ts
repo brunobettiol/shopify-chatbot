@@ -14,8 +14,11 @@ export async function OPTIONS() {
   });
 }
 
-export async function GET(request: Request, context: { params: Record<string, string> }) {
-  const { threadId } = context.params;
+export async function GET(
+  request: Request,
+  context: { params: Promise<{ threadId: string }> }
+) {
+  const { threadId } = await context.params;
   const history = getHistory(threadId);
   if (!history) {
     return new NextResponse(JSON.stringify({ error: "Thread not found" }), {
@@ -37,8 +40,11 @@ export async function GET(request: Request, context: { params: Record<string, st
   });
 }
 
-export async function DELETE(request: Request, context: { params: Record<string, string> }) {
-  const { threadId } = context.params;
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ threadId: string }> }
+) {
+  const { threadId } = await context.params;
   const history = getHistory(threadId);
   if (!history) {
     return new NextResponse(JSON.stringify({ error: "Thread not found" }), {

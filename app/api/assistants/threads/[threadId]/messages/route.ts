@@ -17,8 +17,8 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request, context: { params: Record<string, string> }) {
-  const { threadId } = context.params;
+export async function POST(request: Request, context: { params: Promise<{ threadId: string }> }) {
+  const { threadId } = await context.params;
   try {
     const { content } = await request.json();
 
