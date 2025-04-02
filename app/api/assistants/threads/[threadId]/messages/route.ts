@@ -1,11 +1,10 @@
 import openai from 'app/openai';
 import { NextResponse } from 'next/server';
-import { appendMessage } from '../../sessionStore';
+import { appendMessage, cleanupInactiveSessions } from '../../sessionStore';
 
 const assistantId: string = process.env.OPENAI_ASSISTANT_ID ?? 'default_assistant_id';
 const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
 
-// Preflight handler for CORS
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 200,
@@ -17,7 +16,13 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request, context: { params: Promise<{ threadId: string }> }) {
+export async function POST(
+  request: Request,
+  context: { params: Promise<{ threadId: string }> }
+) {
+  // Run global cleanup
+  cleanupInactiveSessions();
+
   const { threadId } = await context.params;
   try {
     const { content } = await request.json();
@@ -43,7 +48,6 @@ export async function POST(request: Request, context: { params: Promise<{ thread
       readable = (stream as unknown) as ReadableStream<any>;
     }
 
-    // Intercept the stream to accumulate the assistant's full response
     const decoder = new TextDecoder();
     let fullResponseData = "";
     const reader = readable.getReader();
@@ -62,7 +66,6 @@ export async function POST(request: Request, context: { params: Promise<{ thread
           console.error("Error reading assistant stream:", err);
           controller.error(err);
         } finally {
-          // Parse the accumulated NDJSON data to extract assistant text
           let assistantText = "";
           try {
             const lines = fullResponseData.split("\n").filter(line => line.trim() !== "");
@@ -82,7 +85,6 @@ export async function POST(request: Request, context: { params: Promise<{ thread
           } catch (parseError) {
             console.error("Error parsing assistant response data:", parseError);
           }
-          // Save the full assistant reply to session history
           if (assistantText) {
             appendMessage(threadId, 'assistant', assistantText);
           }

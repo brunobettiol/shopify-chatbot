@@ -1,4 +1,4 @@
-import { getHistory, clearHistory } from '../../sessionStore';
+import { getHistory, clearHistory, cleanupInactiveSessions } from '../../sessionStore';
 import { NextResponse } from 'next/server';
 
 const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
@@ -18,6 +18,9 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ threadId: string }> }
 ) {
+  // Run global cleanup of inactive sessions before handling the request
+  cleanupInactiveSessions();
+
   const { threadId } = await context.params;
   const history = getHistory(threadId);
   if (!history) {
@@ -44,6 +47,9 @@ export async function DELETE(
   request: Request,
   context: { params: Promise<{ threadId: string }> }
 ) {
+  // Run global cleanup of inactive sessions before handling the request
+  cleanupInactiveSessions();
+
   const { threadId } = await context.params;
   const history = getHistory(threadId);
   if (!history) {

@@ -6,17 +6,22 @@ interface ChatMessage {
   text: string;
 }
 
-interface SessionsData {
-  [threadId: string]: ChatMessage[];
+interface Session {
+  messages: ChatMessage[];
+  lastActive: number; // timestamp in milliseconds
 }
 
-// Define the path for persistent storage (JSON file)
+interface SessionsData {
+  [threadId: string]: Session;
+}
+
+// Path to persistent storage file (JSON)
 const dataFilePath = path.join(process.cwd(), 'sessions.json');
 
 // In-memory sessions store
 let sessions: SessionsData = {};
 
-// Load sessions from file at startup (if available)
+// Load existing sessions from file (if any) at startup
 try {
   if (fs.existsSync(dataFilePath)) {
     const fileData = fs.readFileSync(dataFilePath, 'utf-8');
@@ -27,7 +32,7 @@ try {
   sessions = {};
 }
 
-// Persist the in-memory sessions back to the JSON file
+// Persist sessions back to the file
 function saveSessions() {
   try {
     fs.writeFileSync(dataFilePath, JSON.stringify(sessions, null, 2), 'utf-8');
@@ -36,41 +41,52 @@ function saveSessions() {
   }
 }
 
-/**
- * Create a new session for a thread.
- */
+// Set inactivity limit: 3 days (in milliseconds)
+const INACTIVITY_LIMIT = 3 * 24 * 60 * 60 * 1000;
+
+// Cleanup function: removes any sessions inactive for more than 3 days
+export function cleanupInactiveSessions() {
+  const now = Date.now();
+  let updated = false;
+  for (const threadId in sessions) {
+    if (now - sessions[threadId].lastActive > INACTIVITY_LIMIT) {
+      delete sessions[threadId];
+      updated = true;
+    }
+  }
+  if (updated) {
+    saveSessions();
+  }
+}
+
 export function createSession(threadId: string) {
-  sessions[threadId] = [];
+  sessions[threadId] = {
+    messages: [],
+    lastActive: Date.now()
+  };
   saveSessions();
 }
 
-/**
- * Append a message to a session's history.
- * @param threadId The session/thread ID.
- * @param role Either "user" or "assistant".
- * @param text The message content.
- */
 export function appendMessage(threadId: string, role: string, text: string) {
   if (!sessions[threadId]) {
-    sessions[threadId] = [];
+    createSession(threadId);
   }
-  sessions[threadId].push({ role, text });
+  sessions[threadId].messages.push({ role, text });
+  sessions[threadId].lastActive = Date.now();
   saveSessions();
 }
 
-/**
- * Get the full chat history for a session.
- */
 export function getHistory(threadId: string): ChatMessage[] | undefined {
-  return sessions[threadId];
+  if (!sessions[threadId]) {
+    return undefined;
+  }
+  return sessions[threadId].messages;
 }
 
-/**
- * Clear a session's history.
- */
 export function clearHistory(threadId: string) {
   if (sessions[threadId]) {
-    sessions[threadId] = [];
+    sessions[threadId].messages = [];
+    sessions[threadId].lastActive = Date.now();
     saveSessions();
   }
 }
