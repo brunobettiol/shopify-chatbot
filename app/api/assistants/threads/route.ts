@@ -24,7 +24,7 @@ export async function POST() {
     // Initialize session history for this thread (guest session)
     createSession(threadId);
     // Optionally add an initial assistant greeting to the session history
-    appendMessage(threadId, 'assistant', 'Chat started!');
+    appendMessage(threadId, 'assistant', 'Hi! How can I help you?');
     // Return the new thread ID to the client with CORS headers
     return NextResponse.json(
       { threadId },

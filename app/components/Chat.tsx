@@ -13,7 +13,7 @@ const Chat = ({ functionCallHandler }: any) => {
       .then((res) => res.json())
       .then((data) => {
         setThreadId(data.threadId);
-        setMessages([{ role: "assistant", text: "Chat started!" }]);
+        setMessages([{ role: "assistant", text: "Hi! How can I help you?" }]);
       })
       .catch((err) => console.error(err));
   }, []);
