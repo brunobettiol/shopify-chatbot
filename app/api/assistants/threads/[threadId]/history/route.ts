@@ -1,4 +1,4 @@
-import { getHistory, clearHistory, cleanupInactiveSessions } from '../../sessionStore';
+import { getHistory, clearHistory } from '../../sessionStore';
 import { NextResponse } from 'next/server';
 
 const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
@@ -18,11 +18,8 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ threadId: string }> }
 ) {
-  // Run global cleanup of inactive sessions before handling the request
-  cleanupInactiveSessions();
-
   const { threadId } = await context.params;
-  const history = getHistory(threadId);
+  const history = await getHistory(threadId);
   if (!history) {
     return new NextResponse(JSON.stringify({ error: "Thread not found" }), {
       status: 404,
@@ -47,11 +44,8 @@ export async function DELETE(
   request: Request,
   context: { params: Promise<{ threadId: string }> }
 ) {
-  // Run global cleanup of inactive sessions before handling the request
-  cleanupInactiveSessions();
-
   const { threadId } = await context.params;
-  const history = getHistory(threadId);
+  const history = await getHistory(threadId);
   if (!history) {
     return new NextResponse(JSON.stringify({ error: "Thread not found" }), {
       status: 404,
@@ -63,7 +57,7 @@ export async function DELETE(
       }
     });
   }
-  clearHistory(threadId);
+  await clearHistory(threadId);
   return new NextResponse(null, {
     status: 204,
     headers: {

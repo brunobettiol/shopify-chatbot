@@ -1,5 +1,4 @@
-import fs from 'fs';
-import path from 'path';
+import { createClient } from 'redis';
 
 interface ChatMessage {
   role: string;
@@ -8,85 +7,94 @@ interface ChatMessage {
 
 interface Session {
   messages: ChatMessage[];
-  lastActive: number; // timestamp in milliseconds
+  lastActive: number;
 }
 
-interface SessionsData {
-  [threadId: string]: Session;
+const INACTIVITY_LIMIT_SECONDS = 3 * 24 * 60 * 60; // 3 days in seconds
+
+// Read Redis URL from environment variables
+const redisUrl = process.env.REDIS_URL;
+if (!redisUrl) {
+  throw new Error("Missing REDIS_URL environment variable");
 }
 
-// Path to persistent storage file (JSON)
-const dataFilePath = path.join(process.cwd(), 'sessions.json');
+// Create and connect Redis client using the .env connection string
+const redisClient = createClient({ url: redisUrl });
+redisClient.on('error', (err) => console.error('Redis Client Error', err));
 
-// In-memory sessions store
-let sessions: SessionsData = {};
-
-// Load existing sessions from file (if any) at startup
-try {
-  if (fs.existsSync(dataFilePath)) {
-    const fileData = fs.readFileSync(dataFilePath, 'utf-8');
-    sessions = JSON.parse(fileData);
-  }
-} catch (err) {
-  console.error('Could not load session history file:', err);
-  sessions = {};
-}
-
-// Persist sessions back to the file
-function saveSessions() {
+(async () => {
   try {
-    fs.writeFileSync(dataFilePath, JSON.stringify(sessions, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to save session data:', err);
+    await redisClient.connect();
+    console.log("Connected to Redis");
+  } catch (error) {
+    console.error("Failed to connect to Redis:", error);
   }
+})();
+
+// Helper function to get the key for a session by threadId
+function getSessionKey(threadId: string): string {
+  return `session:${threadId}`;
 }
 
-// Set inactivity limit: 3 days (in milliseconds)
-const INACTIVITY_LIMIT = 3 * 24 * 60 * 60 * 1000;
-
-// Cleanup function: removes any sessions inactive for more than 3 days
-export function cleanupInactiveSessions() {
-  const now = Date.now();
-  let updated = false;
-  for (const threadId in sessions) {
-    if (now - sessions[threadId].lastActive > INACTIVITY_LIMIT) {
-      delete sessions[threadId];
-      updated = true;
-    }
-  }
-  if (updated) {
-    saveSessions();
-  }
-}
-
-export function createSession(threadId: string) {
-  sessions[threadId] = {
+/**
+ * Creates a new session for a given thread.
+ */
+export async function createSession(threadId: string): Promise<void> {
+  const session: Session = {
     messages: [],
-    lastActive: Date.now()
+    lastActive: Date.now(),
   };
-  saveSessions();
+  const key = getSessionKey(threadId);
+  await redisClient.set(key, JSON.stringify(session));
+  await redisClient.expire(key, INACTIVITY_LIMIT_SECONDS);
 }
 
-export function appendMessage(threadId: string, role: string, text: string) {
-  if (!sessions[threadId]) {
-    createSession(threadId);
+/**
+ * Appends a new message to a session’s history.
+ * If no session exists, a new one is created.
+ */
+export async function appendMessage(threadId: string, role: string, text: string): Promise<void> {
+  const key = getSessionKey(threadId);
+  const sessionStr = await redisClient.get(key);
+  let session: Session;
+  if (sessionStr) {
+    session = JSON.parse(sessionStr);
+  } else {
+    session = { messages: [], lastActive: Date.now() };
   }
-  sessions[threadId].messages.push({ role, text });
-  sessions[threadId].lastActive = Date.now();
-  saveSessions();
+  session.messages.push({ role, text });
+  session.lastActive = Date.now();
+  await redisClient.set(key, JSON.stringify(session));
+  await redisClient.expire(key, INACTIVITY_LIMIT_SECONDS);
 }
 
-export function getHistory(threadId: string): ChatMessage[] | undefined {
-  if (!sessions[threadId]) {
+/**
+ * Retrieves the chat history (messages) for a given thread.
+ */
+export async function getHistory(threadId: string): Promise<ChatMessage[] | undefined> {
+  const key = getSessionKey(threadId);
+  const sessionStr = await redisClient.get(key);
+  if (!sessionStr) {
     return undefined;
   }
-  return sessions[threadId].messages;
+  const session: Session = JSON.parse(sessionStr);
+  return session.messages;
 }
 
-export function clearHistory(threadId: string) {
-  if (sessions[threadId]) {
-    sessions[threadId].messages = [];
-    sessions[threadId].lastActive = Date.now();
-    saveSessions();
+/**
+ * Clears the session's history by setting its messages to an empty array.
+ */
+export async function clearHistory(threadId: string): Promise<void> {
+  const key = getSessionKey(threadId);
+  const sessionStr = await redisClient.get(key);
+  let session: Session;
+  if (sessionStr) {
+    session = JSON.parse(sessionStr);
+  } else {
+    session = { messages: [], lastActive: Date.now() };
   }
+  session.messages = [];
+  session.lastActive = Date.now();
+  await redisClient.set(key, JSON.stringify(session));
+  await redisClient.expire(key, INACTIVITY_LIMIT_SECONDS);
 }
