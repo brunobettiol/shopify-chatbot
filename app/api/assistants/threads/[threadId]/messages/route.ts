@@ -17,6 +17,13 @@ export async function OPTIONS() {
   });
 }
 
+/**
+ * In this modified version we intercept the stream’s full response data.
+ * After the streaming finishes we check whether a function call was returned.
+ * If so, we call the products API endpoint (for example, with a search query)
+ * and update the conversation history with a natural assistant reply that includes
+ * product information.
+ */
 export async function POST(
   request: Request,
   context: { params: Promise<{ threadId: string }> }
@@ -65,12 +72,19 @@ export async function POST(
           console.error("Error reading assistant stream:", err);
           controller.error(err);
         } finally {
-          // Parse the accumulated NDJSON data to extract assistant text
+          // After stream completion, parse the accumulated NDJSON data.
           let assistantText = "";
+          let functionCallData = null;
           try {
             const lines = fullResponseData.split("\n").filter(line => line.trim() !== "");
             for (const line of lines) {
               const jsonObj = JSON.parse(line);
+              // If a delta event contains a function_call field, capture it.
+              if (jsonObj.message && jsonObj.message.function_call) {
+                functionCallData = jsonObj.message.function_call;
+                // Optionally break here if you assume only one function call.
+                break;
+              }
               if (jsonObj.event === "thread.message.delta") {
                 const delta = jsonObj.data?.delta;
                 if (delta && Array.isArray(delta.content)) {
@@ -85,7 +99,38 @@ export async function POST(
           } catch (parseError) {
             console.error("Error parsing assistant response data:", parseError);
           }
-          // Save the full assistant reply to session history
+          // If a function call was detected, call the product API endpoint.
+          if (functionCallData) {
+            try {
+              let searchQuery = "";
+              try {
+                const args = JSON.parse(functionCallData.arguments);
+                searchQuery = args.query;
+              } catch (e) {
+                console.error("Failed to parse function call arguments:", e);
+              }
+              if (searchQuery) {
+                const productResponse = await fetch("https://shopify-chatbot-production-044b.up.railway.app/api/shopify/products", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ product_name: searchQuery })
+                });
+                if (!productResponse.ok) {
+                  console.error("Product API error:", await productResponse.text());
+                } else {
+                  const products = await productResponse.json();
+                  if (products && products.length > 0) {
+                    const product = products[0]; // simple selection logic
+                    const productLink = "https://partnerinaging.myshopify.com/products/" + product.handle;
+                    assistantText = `I recommend **${product.title}**. Price: ${product.price} ${product.currency}. Check it out here: ${productLink}`;
+                  }
+                }
+              }
+            } catch (functionError) {
+              console.error("Error during function call handling:", functionError);
+            }
+          }
+          // Save the full (or updated) assistant reply to session history.
           if (assistantText) {
             await appendMessage(threadId, 'assistant', assistantText);
           }
