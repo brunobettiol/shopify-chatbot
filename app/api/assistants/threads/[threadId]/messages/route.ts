@@ -5,6 +5,24 @@ import { appendMessage } from '../../sessionStore';
 const assistantId: string = process.env.OPENAI_ASSISTANT_ID ?? 'default_assistant_id';
 const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
 
+// Define the function schema for product search
+const functions = [
+  {
+    name: "search_products",
+    description: "Search for products in the Shopify catalog matching a given query",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The product search query, e.g. 'cleansing cream'"
+        }
+      },
+      required: ["query"]
+    }
+  }
+];
+
 // Preflight handler for CORS
 export async function OPTIONS() {
   console.log('OPTIONS request received.');
@@ -21,7 +39,7 @@ export async function OPTIONS() {
 /**
  * In this modified version we intercept the stream’s full response data.
  * After the streaming finishes we check whether a function call was returned.
- * If so, we call the products API endpoint (for example, with a search query)
+ * If so, we call the products API endpoint (with a search query)
  * and update the conversation history with a natural assistant reply that includes
  * product information.
  */
@@ -46,11 +64,14 @@ export async function POST(
     });
     console.log('User message sent to OpenAI.');
 
-    // Start the streaming response for the assistant's reply
+    // Start the streaming response for the assistant's reply,
+    // including the function definitions in the payload.
     const stream = openai.beta.threads.runs.stream(threadId, {
       assistant_id: assistantId,
-    });
-    console.log('Streaming response initiated from OpenAI.');
+      functions: functions,
+      function_call: "auto"
+    } as any);
+    console.log('Streaming response initiated from OpenAI with functions definition.');
 
     let readable: ReadableStream<any>;
     if (typeof (stream as any).toReadableStream === 'function') {
@@ -95,8 +116,7 @@ export async function POST(
               if (jsonObj.message && jsonObj.message.function_call) {
                 functionCallData = jsonObj.message.function_call;
                 console.log("Function call detected:", functionCallData);
-                // Optionally break here if you assume only one function call.
-                break;
+                break; // Assume only one function call for now
               }
               if (jsonObj.event === "thread.message.delta") {
                 const delta = jsonObj.data?.delta;
