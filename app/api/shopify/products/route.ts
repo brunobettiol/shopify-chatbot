@@ -1,6 +1,6 @@
-import { NextResponse } from 'next/server';
+import { NextResponse } from "next/server";
 
-const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
+const ALLOWED_ORIGIN = "https://partnerinaging.myshopify.com";
 
 const accessToken = process.env.SHOPIFY_TOKEN;
 const shop = process.env.SHOPIFY_STORE;
@@ -18,6 +18,7 @@ interface ShopifyProductsPage {
     node: {
       id: string;
       title: string;
+      handle: string;
       descriptionHtml: string;
       priceRange: {
         minVariantPrice: {
@@ -44,9 +45,10 @@ interface ShopifyProductsResponse {
   errors?: any;
 }
 
-interface Product {
+export interface Product {
   id: string;
   title: string;
+  handle: string;
   description: string;
   price: string;
   currency: string;
@@ -68,6 +70,7 @@ query getProducts($cursor: String) {
       node {
         id
         title
+        handle
         descriptionHtml
         priceRange {
           minVariantPrice {
@@ -93,10 +96,10 @@ export async function OPTIONS() {
   return new NextResponse(null, {
     status: 200,
     headers: {
-      'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type'
-    }
+      "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    },
   });
 }
 
@@ -173,6 +176,7 @@ export async function POST(request: Request) {
       const products: Product[] = productsPage.edges.map((productEdge) => ({
         id: productEdge.node.id,
         title: productEdge.node.title,
+        handle: productEdge.node.handle,
         description: productEdge.node.descriptionHtml,
         price: productEdge.node.priceRange.minVariantPrice.amount,
         currency: productEdge.node.priceRange.minVariantPrice.currencyCode,
@@ -187,7 +191,6 @@ export async function POST(request: Request) {
       allProducts.push(...products);
 
       hasNextPage = productsPage.pageInfo.hasNextPage;
-
       // Set the cursor to the last product's cursor if there is a next page.
       if (hasNextPage && productsPage.edges.length > 0) {
         cursor = productsPage.edges[productsPage.edges.length - 1].cursor;
