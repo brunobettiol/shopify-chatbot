@@ -5,24 +5,6 @@ import { appendMessage } from '../../sessionStore';
 const assistantId: string = process.env.OPENAI_ASSISTANT_ID ?? 'default_assistant_id';
 const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
 
-// Define the function schema for product search
-const functions = [
-  {
-    name: "search_products",
-    description: "Search for products in the Shopify catalog matching a given query",
-    parameters: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "The product search query, e.g. 'cleansing cream'"
-        }
-      },
-      required: ["query"]
-    }
-  }
-];
-
 // Preflight handler for CORS
 export async function OPTIONS() {
   console.log('OPTIONS request received.');
@@ -37,11 +19,10 @@ export async function OPTIONS() {
 }
 
 /**
- * In this modified version we intercept the stream’s full response data.
- * After the streaming finishes we check whether a function call was returned.
- * If so, we call the products API endpoint (with a search query)
- * and update the conversation history with a natural assistant reply that includes
- * product information.
+ * This version intercepts the streaming NDJSON output and looks for tool_calls.
+ * It accumulates the JSON fragments of tool call arguments and, if complete,
+ * calls the product API endpoint. Finally, it appends the (possibly updated)
+ * assistant response to session history.
  */
 export async function POST(
   request: Request,
@@ -57,21 +38,21 @@ export async function POST(
     await appendMessage(threadId, 'user', content);
     console.log('User message appended to session history.');
 
-    // Create a new message in the thread (send the user message to OpenAI)
+    // Send the user message to OpenAI
     await openai.beta.threads.messages.create(threadId, {
       role: "user",
       content,
     });
     console.log('User message sent to OpenAI.');
 
-    // Start the streaming response for the assistant's reply,
-    // including the function definitions in the payload.
+    // Initiate streaming response from OpenAI.
+    // Ensure your openai module is configured to use model "gpt-4-0125-preview".
     const stream = openai.beta.threads.runs.stream(threadId, {
-      assistant_id: assistantId,
-      functions: functions,
-      function_call: "auto"
+      assistant_id: assistantId
+      // Note: The streaming endpoint does support tool_calls with the proper model.
+      // If you encounter errors, you may need to upgrade the endpoint or use a non-streaming endpoint.
     } as any);
-    console.log('Streaming response initiated from OpenAI with functions definition.');
+    console.log('Streaming response initiated from OpenAI.');
 
     let readable: ReadableStream<any>;
     if (typeof (stream as any).toReadableStream === 'function') {
@@ -80,9 +61,11 @@ export async function POST(
       readable = (stream as unknown) as ReadableStream<any>;
     }
 
-    // Intercept the stream to accumulate the assistant's full response
     const decoder = new TextDecoder();
     let fullResponseData = "";
+    let toolCallAccumulator = "";
+    let toolCallId: string | null = null;
+    let assistantText = "";
     const reader = readable.getReader();
 
     const interceptedStream = new ReadableStream({
@@ -103,21 +86,26 @@ export async function POST(
           console.error("Error reading assistant stream:", err);
           controller.error(err);
         } finally {
-          // After stream completion, parse the accumulated NDJSON data.
-          let assistantText = "";
-          let functionCallData = null;
           try {
             const lines = fullResponseData.split("\n").filter(line => line.trim() !== "");
             console.log(`Total lines received: ${lines.length}`);
             for (const line of lines) {
               console.log("Processing line:", line);
               const jsonObj = JSON.parse(line);
-              // If a delta event contains a function_call field, capture it.
-              if (jsonObj.message && jsonObj.message.function_call) {
-                functionCallData = jsonObj.message.function_call;
-                console.log("Function call detected:", functionCallData);
-                break; // Assume only one function call for now
+              // Check for tool_calls in delta
+              if (jsonObj.choices && jsonObj.choices[0] && jsonObj.choices[0].delta && jsonObj.choices[0].delta.tool_calls) {
+                const toolCalls = jsonObj.choices[0].delta.tool_calls;
+                for (const tc of toolCalls) {
+                  if (tc.id) {
+                    toolCallId = tc.id;
+                  }
+                  if (tc.function && tc.function.arguments) {
+                    toolCallAccumulator += tc.function.arguments;
+                    console.log("Accumulating tool call arguments:", toolCallAccumulator);
+                  }
+                }
               }
+              // Also accumulate normal text responses
               if (jsonObj.event === "thread.message.delta") {
                 const delta = jsonObj.data?.delta;
                 if (delta && Array.isArray(delta.content)) {
@@ -132,17 +120,12 @@ export async function POST(
           } catch (parseError) {
             console.error("Error parsing assistant response data:", parseError);
           }
-          // If a function call was detected, call the product API endpoint.
-          if (functionCallData) {
+          // If we accumulated any tool call arguments, attempt to process them.
+          if (toolCallAccumulator) {
             try {
-              let searchQuery = "";
-              try {
-                const args = JSON.parse(functionCallData.arguments);
-                searchQuery = args.query;
-                console.log("Parsed function call arguments, search query:", searchQuery);
-              } catch (e) {
-                console.error("Failed to parse function call arguments:", e);
-              }
+              const parsedArgs = JSON.parse(toolCallAccumulator);
+              const searchQuery = parsedArgs.query;
+              console.log("Parsed function call arguments, search query:", searchQuery);
               if (searchQuery) {
                 console.log("Calling product API with search query:", searchQuery);
                 const productResponse = await fetch("https://shopify-chatbot-production-044b.up.railway.app/api/shopify/products", {
@@ -169,10 +152,9 @@ export async function POST(
               console.error("Error during function call handling:", functionError);
             }
           } else {
-            console.log("No function call detected in the response.");
+            console.log("No tool call arguments accumulated.");
           }
           console.log("Final assistant text after processing:", assistantText);
-          // Save the full (or updated) assistant reply to session history.
           if (assistantText) {
             await appendMessage(threadId, 'assistant', assistantText);
             console.log("Assistant message appended to session history.");
