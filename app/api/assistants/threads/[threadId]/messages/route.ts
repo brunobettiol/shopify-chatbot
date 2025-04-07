@@ -68,7 +68,7 @@ export async function POST(
 
     // Convert the assistant stream to a Node.js Readable stream.
     const nodeReadable = Readable.from(assistantStream as any);
-    // Convert the Node.js stream to a Web ReadableStream to use getReader().
+    // Convert the Node.js stream to a Web ReadableStream so we can use getReader().
     const webReadable = Readable.toWeb(nodeReadable);
     const reader = webReadable.getReader();
 
@@ -113,7 +113,7 @@ export async function POST(
                     }
                   }
                 }
-                // Accumulate normal text responses.
+                // Accumulate normal text responses from delta events.
                 if (json.event === 'thread.message.delta') {
                   const delta = json.data?.delta;
                   if (delta?.content && Array.isArray(delta.content)) {
@@ -123,12 +123,20 @@ export async function POST(
                       }
                     }
                   }
+                } else if (json.event === 'thread.message') {
+                  // Also check for a final message event.
+                  const message = json.data?.message;
+                  if (message?.content && typeof message.content === 'string') {
+                    assistantText += message.content;
+                  }
                 }
               } catch (e) {
                 console.warn('Skipping malformed JSON line');
               }
             }
           }
+          // Flush any remaining bytes.
+          fullResponseData += decoder.decode();
           controller.close();
         } catch (err) {
           console.error('Error reading assistant stream:', err);
@@ -171,12 +179,13 @@ export async function POST(
             assistantText = fullResponseData;
           }
 
-          if (assistantText) {
-            await appendMessage(threadId, 'assistant', assistantText);
-            console.log('Final assistant message:', assistantText);
-          } else {
-            console.log('No assistant message produced.');
+          // If still no text, provide a default message.
+          if (!assistantText) {
+            assistantText = "I'm sorry, I didn't receive a response.";
           }
+
+          await appendMessage(threadId, 'assistant', assistantText);
+          console.log('Final assistant message:', assistantText);
           // Mark the run as complete.
           activeRuns[threadId] = false;
         }
