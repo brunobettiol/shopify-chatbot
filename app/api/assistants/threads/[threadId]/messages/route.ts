@@ -6,6 +6,9 @@ import { Readable } from 'stream';
 const assistantId: string = process.env.OPENAI_ASSISTANT_ID ?? 'default_assistant_id';
 const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
 
+// Global active runs map (for demonstration only)
+const activeRuns: Record<string, boolean> = {};
+
 export async function OPTIONS() {
   console.log('OPTIONS request received.');
   return new NextResponse(null, {
@@ -25,28 +28,47 @@ export async function POST(
   const { threadId } = await context.params;
   console.log(`POST /messages invoked for threadId: ${threadId}`);
   try {
+    // Check if a run is already active for this thread.
+    if (activeRuns[threadId]) {
+      return new NextResponse(
+        JSON.stringify({ error: "A run is already active for this thread. Please wait until it finishes." }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type'
+          }
+        }
+      );
+    }
+
     const { content } = await request.json();
     console.log(`User message received: ${content}`);
 
-    // Save user's message to session history
+    // Save user's message to session history.
     await appendMessage(threadId, 'user', content);
     console.log('User message appended to session history.');
 
-    // Send user message to OpenAI
+    // Send user's message to OpenAI.
     await openai.beta.threads.messages.create(threadId, {
       role: 'user',
       content,
     });
     console.log('User message sent to OpenAI.');
 
-    // Initiate streaming response from OpenAI
+    // Mark run as active.
+    activeRuns[threadId] = true;
+
+    // Start the streaming run.
     const assistantStream = openai.beta.threads.runs.stream(threadId, {
       assistant_id: assistantId,
     });
 
-    // Convert the assistant stream to a Node.js Readable stream
+    // Convert the assistant stream to a Node.js Readable stream.
     const nodeReadable = Readable.from(assistantStream as any);
-    // Convert the Node.js stream into a Web ReadableStream so that we can use getReader()
+    // Convert Node.js stream to a Web ReadableStream (which supports getReader()).
     const webReadable = Readable.toWeb(nodeReadable);
     const reader = webReadable.getReader();
 
@@ -62,18 +84,17 @@ export async function POST(
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            
-            // Ensure value is a Uint8Array; if it's a string, convert it.
+
+            // Ensure the chunk is a Uint8Array.
             let chunk: Uint8Array;
             if (typeof value === 'string') {
               chunk = new TextEncoder().encode(value);
             } else if (value instanceof Uint8Array) {
               chunk = value;
             } else {
-              // Fallback conversion
               chunk = new Uint8Array(value);
             }
-            
+
             const chunkStr = decoder.decode(chunk, { stream: true });
             fullResponseData += chunkStr;
             controller.enqueue(chunk);
@@ -82,7 +103,7 @@ export async function POST(
             for (const line of lines) {
               try {
                 const json = JSON.parse(line);
-                // Look for tool call function arguments
+                // Look for tool call function arguments.
                 if (json.choices && json.choices[0]?.delta?.tool_calls) {
                   const toolCalls = json.choices[0].delta.tool_calls;
                   for (const call of toolCalls) {
@@ -92,7 +113,7 @@ export async function POST(
                     }
                   }
                 }
-                // Accumulate normal text responses
+                // Accumulate normal text responses.
                 if (json.event === 'thread.message.delta') {
                   const delta = json.data?.delta;
                   if (delta?.content) {
@@ -113,7 +134,7 @@ export async function POST(
           console.error('Error reading assistant stream:', err);
           controller.error(err);
         } finally {
-          // If a tool call was detected, process it
+          // Process any detected tool call.
           if (toolCallDetected && toolCallArgs) {
             try {
               const parsedArgs = JSON.parse(toolCallArgs);
@@ -146,11 +167,13 @@ export async function POST(
             }
           }
 
-          // Append the final assistant text to session history if available
+          // Append the final assistant message.
           if (assistantText) {
             await appendMessage(threadId, 'assistant', assistantText);
             console.log('Final assistant message:', assistantText);
           }
+          // Mark the run as complete.
+          activeRuns[threadId] = false;
         }
       }
     });
