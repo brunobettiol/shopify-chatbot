@@ -18,6 +18,12 @@ export async function OPTIONS() {
   });
 }
 
+/**
+ * This version intercepts the streaming NDJSON output from OpenAI.
+ * It accumulates JSON fragments and checks both for delta events and a final "thread.message" event.
+ * If any tool call arguments are detected, it calls the product API and uses that result.
+ * Finally, it appends the assistant’s response (if any) to session history.
+ */
 export async function POST(
   request: Request,
   context: { params: Promise<{ threadId: string }> }
@@ -28,17 +34,23 @@ export async function POST(
     const { content } = await request.json();
     console.log(`User message received: ${content}`);
 
+    // Save the user's message to the session history.
     await appendMessage(threadId, 'user', content);
     console.log('User message appended to session history.');
 
+    // Send the user's message to OpenAI.
     await openai.beta.threads.messages.create(threadId, {
-      role: 'user',
+      role: "user",
       content,
     });
     console.log('User message sent to OpenAI.');
 
+    // Initiate streaming response from OpenAI.
+    // Ensure your openai module is configured to use model "gpt-4-0125-preview".
     const stream = openai.beta.threads.runs.stream(threadId, {
-      assistant_id: assistantId,
+      assistant_id: assistantId
+      // Note: The streaming endpoint does support tool_calls with the proper model.
+      // If you encounter errors, you may need to upgrade the endpoint or use a non-streaming endpoint.
     } as any);
     console.log('Streaming response initiated from OpenAI.');
 
@@ -80,31 +92,46 @@ export async function POST(
             for (const line of lines) {
               console.log("Processing line:", line);
               const jsonObj = JSON.parse(line);
+              // Check for tool_calls in delta
               if (jsonObj.choices && jsonObj.choices[0]?.delta?.tool_calls) {
                 const toolCalls = jsonObj.choices[0].delta.tool_calls;
                 for (const tc of toolCalls) {
-                  if (tc.id) toolCallId = tc.id;
-                  if (tc.function?.arguments) {
+                  if (tc.id) {
+                    toolCallId = tc.id;
+                  }
+                  if (tc.function && tc.function.arguments) {
                     toolCallAccumulator += tc.function.arguments;
                     console.log("Accumulating tool call arguments:", toolCallAccumulator);
                   }
                 }
               }
+              // Accumulate normal text responses from delta events
               if (jsonObj.event === "thread.message.delta") {
                 const delta = jsonObj.data?.delta;
-                if (delta && Array.isArray(delta.content)) {
-                  for (const part of delta.content) {
-                    if (part.type === "text" && part.text?.value) {
-                      assistantText += part.text.value;
+                if (delta) {
+                  if (Array.isArray(delta.content)) {
+                    for (const part of delta.content) {
+                      if (part.type === "text" && part.text?.value) {
+                        assistantText += part.text.value;
+                      }
                     }
+                  } else if (typeof delta.content === "string") {
+                    assistantText += delta.content;
                   }
+                }
+              }
+              // Also check for a final message event.
+              if (jsonObj.event === "thread.message") {
+                const message = jsonObj.data?.message;
+                if (message && message.content) {
+                  assistantText += message.content;
                 }
               }
             }
           } catch (parseError) {
             console.error("Error parsing assistant response data:", parseError);
           }
-
+          // If we accumulated any tool call arguments, process them.
           if (toolCallAccumulator) {
             try {
               const parsedArgs = JSON.parse(toolCallAccumulator);
@@ -124,9 +151,9 @@ export async function POST(
                 } else {
                   const products = await productResponse.json();
                   console.log("Product API returned products, count:", products.length);
-                  if (products?.length > 0) {
-                    const product = products[0];
-                    const productLink = `https://partnerinaging.myshopify.com/products/${product.handle}`;
+                  if (products && products.length > 0) {
+                    const product = products[0]; // simple selection logic
+                    const productLink = "https://partnerinaging.myshopify.com/products/" + product.handle;
                     assistantText = `I recommend **${product.title}**. Price: ${product.price} ${product.currency}. Check it out here: ${productLink}`;
                     console.log("Selected product:", product.title, "Link:", productLink);
                   }
