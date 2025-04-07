@@ -6,7 +6,7 @@ import { Readable } from 'stream';
 const assistantId: string = process.env.OPENAI_ASSISTANT_ID ?? 'default_assistant_id';
 const ALLOWED_ORIGIN = 'https://partnerinaging.myshopify.com';
 
-// Global active runs map (for demonstration only)
+// Global in-memory active run tracker (for demonstration only)
 const activeRuns: Record<string, boolean> = {};
 
 export async function OPTIONS() {
@@ -28,7 +28,7 @@ export async function POST(
   const { threadId } = await context.params;
   console.log(`POST /messages invoked for threadId: ${threadId}`);
   try {
-    // Check if a run is already active for this thread.
+    // Prevent adding a new message if a run is still active.
     if (activeRuns[threadId]) {
       return new NextResponse(
         JSON.stringify({ error: "A run is already active for this thread. Please wait until it finishes." }),
@@ -47,28 +47,28 @@ export async function POST(
     const { content } = await request.json();
     console.log(`User message received: ${content}`);
 
-    // Save user's message to session history.
+    // Save the user's message to session history.
     await appendMessage(threadId, 'user', content);
     console.log('User message appended to session history.');
 
-    // Send user's message to OpenAI.
+    // Send the user's message to OpenAI.
     await openai.beta.threads.messages.create(threadId, {
       role: 'user',
       content,
     });
     console.log('User message sent to OpenAI.');
 
-    // Mark run as active.
+    // Mark the run as active.
     activeRuns[threadId] = true;
 
-    // Start the streaming run.
+    // Initiate the streaming run.
     const assistantStream = openai.beta.threads.runs.stream(threadId, {
       assistant_id: assistantId,
     });
 
     // Convert the assistant stream to a Node.js Readable stream.
     const nodeReadable = Readable.from(assistantStream as any);
-    // Convert Node.js stream to a Web ReadableStream (which supports getReader()).
+    // Convert the Node.js stream to a Web ReadableStream to use getReader().
     const webReadable = Readable.toWeb(nodeReadable);
     const reader = webReadable.getReader();
 
@@ -85,7 +85,7 @@ export async function POST(
             const { done, value } = await reader.read();
             if (done) break;
 
-            // Ensure the chunk is a Uint8Array.
+            // Ensure we have a Uint8Array to decode.
             let chunk: Uint8Array;
             if (typeof value === 'string') {
               chunk = new TextEncoder().encode(value);
@@ -116,7 +116,7 @@ export async function POST(
                 // Accumulate normal text responses.
                 if (json.event === 'thread.message.delta') {
                   const delta = json.data?.delta;
-                  if (delta?.content) {
+                  if (delta?.content && Array.isArray(delta.content)) {
                     for (const part of delta.content) {
                       if (part.type === 'text' && part.text?.value) {
                         assistantText += part.text.value;
@@ -166,11 +166,16 @@ export async function POST(
               console.error('Error handling tool call:', err);
             }
           }
+          // Fallback: if no assistant text was accumulated, use the full raw response.
+          if (!assistantText && fullResponseData) {
+            assistantText = fullResponseData;
+          }
 
-          // Append the final assistant message.
           if (assistantText) {
             await appendMessage(threadId, 'assistant', assistantText);
             console.log('Final assistant message:', assistantText);
+          } else {
+            console.log('No assistant message produced.');
           }
           // Mark the run as complete.
           activeRuns[threadId] = false;
