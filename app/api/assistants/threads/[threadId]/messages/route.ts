@@ -44,9 +44,9 @@ export async function POST(
       assistant_id: assistantId,
     });
 
-    // Convert the returned stream to a Node.js Readable stream
+    // Convert the assistant stream to a Node.js Readable stream
     const nodeReadable = Readable.from(assistantStream as any);
-    // Convert the Node.js stream into a Web ReadableStream to access getReader()
+    // Convert the Node.js stream into a Web ReadableStream so that we can use getReader()
     const webReadable = Readable.toWeb(nodeReadable);
     const reader = webReadable.getReader();
 
@@ -62,12 +62,23 @@ export async function POST(
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            
+            // Ensure value is a Uint8Array; if it's a string, convert it.
+            let chunk: Uint8Array;
+            if (typeof value === 'string') {
+              chunk = new TextEncoder().encode(value);
+            } else if (value instanceof Uint8Array) {
+              chunk = value;
+            } else {
+              // Fallback conversion
+              chunk = new Uint8Array(value);
+            }
+            
+            const chunkStr = decoder.decode(chunk, { stream: true });
+            fullResponseData += chunkStr;
+            controller.enqueue(chunk);
 
-            const chunk = decoder.decode(value, { stream: true });
-            fullResponseData += chunk;
-            controller.enqueue(value);
-
-            const lines = chunk.split('\n').filter(line => line.trim() !== '');
+            const lines = chunkStr.split('\n').filter(line => line.trim() !== '');
             for (const line of lines) {
               try {
                 const json = JSON.parse(line);
