@@ -20,9 +20,10 @@ export async function OPTIONS() {
 
 /**
  * This version intercepts the streaming NDJSON output from OpenAI.
- * It accumulates JSON fragments and checks both for delta events and a final "thread.message" event.
- * If any tool call arguments are detected, it calls the product API and uses that result.
- * Finally, it appends the assistant’s response (if any) to session history.
+ * It accumulates JSON fragments from delta events and also checks for a final
+ * "thread.run.requires_action" event to extract the complete function call arguments.
+ * If any tool call arguments are detected, it calls the product API and uses its output.
+ * Finally, it appends the assistant’s response to the session history.
  */
 export async function POST(
   request: Request,
@@ -46,11 +47,8 @@ export async function POST(
     console.log('User message sent to OpenAI.');
 
     // Initiate streaming response from OpenAI.
-    // Ensure your openai module is configured to use model "gpt-4-0125-preview".
     const stream = openai.beta.threads.runs.stream(threadId, {
-      assistant_id: assistantId
-      // Note: The streaming endpoint does support tool_calls with the proper model.
-      // If you encounter errors, you may need to upgrade the endpoint or use a non-streaming endpoint.
+      assistant_id: assistantId,
     } as any);
     console.log('Streaming response initiated from OpenAI.');
 
@@ -92,7 +90,8 @@ export async function POST(
             for (const line of lines) {
               console.log("Processing line:", line);
               const jsonObj = JSON.parse(line);
-              // Check for tool_calls in delta
+
+              // Check for delta tool_calls fragments.
               if (jsonObj.choices && jsonObj.choices[0]?.delta?.tool_calls) {
                 const toolCalls = jsonObj.choices[0].delta.tool_calls;
                 for (const tc of toolCalls) {
@@ -105,7 +104,21 @@ export async function POST(
                   }
                 }
               }
-              // Accumulate normal text responses from delta events
+
+              // Check for a final requires_action event which contains complete tool call arguments.
+              if (jsonObj.event === "thread.run.requires_action") {
+                const requiredAction = jsonObj.data?.required_action;
+                if (requiredAction && requiredAction.submit_tool_outputs && Array.isArray(requiredAction.submit_tool_outputs.tool_calls)) {
+                  for (const call of requiredAction.submit_tool_outputs.tool_calls) {
+                    if (call.function && call.function.arguments) {
+                      toolCallAccumulator += call.function.arguments;
+                      console.log("Accumulated from requires_action:", toolCallAccumulator);
+                    }
+                  }
+                }
+              }
+
+              // Accumulate normal text responses from delta events.
               if (jsonObj.event === "thread.message.delta") {
                 const delta = jsonObj.data?.delta;
                 if (delta) {
@@ -131,7 +144,8 @@ export async function POST(
           } catch (parseError) {
             console.error("Error parsing assistant response data:", parseError);
           }
-          // If we accumulated any tool call arguments, process them.
+
+          // If tool call arguments were accumulated, try processing them.
           if (toolCallAccumulator) {
             try {
               const parsedArgs = JSON.parse(toolCallAccumulator);
