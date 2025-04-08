@@ -20,10 +20,10 @@ export async function OPTIONS() {
 
 /**
  * This version intercepts the streaming NDJSON output from OpenAI.
- * It accumulates JSON fragments from delta events and also checks for a final
+ * It accumulates JSON fragments from delta events and checks for a final
  * "thread.run.requires_action" event to extract the complete function call arguments.
  * If any tool call arguments are detected, it calls the product API and uses its output.
- * Finally, it appends the assistant’s response to the session history.
+ * Finally, it appends the assistant’s response to the session history and sends a final output chunk.
  */
 export async function POST(
   request: Request,
@@ -66,86 +66,96 @@ export async function POST(
     let assistantText = "";
     const reader = readable.getReader();
 
+    // Create a new intercepted stream that will include a final chunk (if necessary)
     const interceptedStream = new ReadableStream({
       async start(controller) {
         try {
           console.log('Starting to read the streaming data...');
+          // Read all the streaming chunks
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             const chunk = decoder.decode(value, { stream: true });
             console.log('Received chunk:', chunk);
             fullResponseData += chunk;
+            // Forward the raw chunk immediately to the client
             controller.enqueue(value);
           }
-          controller.close();
-          console.log('Finished reading stream.');
         } catch (err) {
           console.error("Error reading assistant stream:", err);
           controller.error(err);
-        } finally {
-          try {
-            const lines = fullResponseData.split("\n").filter(line => line.trim() !== "");
-            console.log(`Total lines received: ${lines.length}`);
-            for (const line of lines) {
-              console.log("Processing line:", line);
-              const jsonObj = JSON.parse(line);
+        }
+        // Process the full streaming data after reading is complete.
+        try {
+          const lines = fullResponseData.split("\n").filter(line => line.trim() !== "");
+          console.log(`Total lines received: ${lines.length}`);
+          for (const line of lines) {
+            console.log("Processing line:", line);
+            let jsonObj;
+            try {
+              jsonObj = JSON.parse(line);
+            } catch (e) {
+              console.error("Error parsing JSON line:", e, line);
+              continue;
+            }
 
-              // Check for delta tool_calls fragments.
-              if (jsonObj.choices && jsonObj.choices[0]?.delta?.tool_calls) {
-                const toolCalls = jsonObj.choices[0].delta.tool_calls;
-                for (const tc of toolCalls) {
-                  if (tc.id) {
-                    toolCallId = tc.id;
-                  }
-                  if (tc.function && tc.function.arguments) {
-                    toolCallAccumulator += tc.function.arguments;
-                    console.log("Accumulating tool call arguments:", toolCallAccumulator);
-                  }
+            // Check for delta tool_calls fragments.
+            if (jsonObj.choices && jsonObj.choices[0]?.delta?.tool_calls) {
+              const toolCalls = jsonObj.choices[0].delta.tool_calls;
+              for (const tc of toolCalls) {
+                if (tc.id) {
+                  toolCallId = tc.id;
                 }
-              }
-
-              // Check for a final requires_action event which contains complete tool call arguments.
-              if (jsonObj.event === "thread.run.requires_action") {
-                const requiredAction = jsonObj.data?.required_action;
-                if (requiredAction && requiredAction.submit_tool_outputs && Array.isArray(requiredAction.submit_tool_outputs.tool_calls)) {
-                  for (const call of requiredAction.submit_tool_outputs.tool_calls) {
-                    if (call.function && call.function.arguments) {
-                      toolCallAccumulator += call.function.arguments;
-                      console.log("Accumulated from requires_action:", toolCallAccumulator);
-                    }
-                  }
-                }
-              }
-
-              // Accumulate normal text responses from delta events.
-              if (jsonObj.event === "thread.message.delta") {
-                const delta = jsonObj.data?.delta;
-                if (delta) {
-                  if (Array.isArray(delta.content)) {
-                    for (const part of delta.content) {
-                      if (part.type === "text" && part.text?.value) {
-                        assistantText += part.text.value;
-                      }
-                    }
-                  } else if (typeof delta.content === "string") {
-                    assistantText += delta.content;
-                  }
-                }
-              }
-              // Also check for a final message event.
-              if (jsonObj.event === "thread.message") {
-                const message = jsonObj.data?.message;
-                if (message && message.content) {
-                  assistantText += message.content;
+                if (tc.function && tc.function.arguments) {
+                  toolCallAccumulator += tc.function.arguments;
+                  console.log("Accumulating tool call arguments:", toolCallAccumulator);
                 }
               }
             }
-          } catch (parseError) {
-            console.error("Error parsing assistant response data:", parseError);
+
+            // Check for a final requires_action event which contains complete tool call arguments.
+            if (jsonObj.event === "thread.run.requires_action") {
+              const requiredAction = jsonObj.data?.required_action;
+              if (
+                requiredAction &&
+                requiredAction.submit_tool_outputs &&
+                Array.isArray(requiredAction.submit_tool_outputs.tool_calls)
+              ) {
+                for (const call of requiredAction.submit_tool_outputs.tool_calls) {
+                  if (call.function && call.function.arguments) {
+                    toolCallAccumulator += call.function.arguments;
+                    console.log("Accumulated from requires_action:", toolCallAccumulator);
+                  }
+                }
+              }
+            }
+
+            // Accumulate normal text responses from delta events.
+            if (jsonObj.event === "thread.message.delta") {
+              const delta = jsonObj.data?.delta;
+              if (delta) {
+                if (Array.isArray(delta.content)) {
+                  for (const part of delta.content) {
+                    if (part.type === "text" && part.text?.value) {
+                      assistantText += part.text.value;
+                    }
+                  }
+                } else if (typeof delta.content === "string") {
+                  assistantText += delta.content;
+                }
+              }
+            }
+
+            // Also check for a final message event.
+            if (jsonObj.event === "thread.message") {
+              const message = jsonObj.data?.message;
+              if (message && message.content) {
+                assistantText += message.content;
+              }
+            }
           }
 
-          // If tool call arguments were accumulated, try processing them.
+          // If tool call arguments were accumulated, process them.
           if (toolCallAccumulator) {
             try {
               const parsedArgs = JSON.parse(toolCallAccumulator);
@@ -168,6 +178,7 @@ export async function POST(
                   if (products && products.length > 0) {
                     const product = products[0]; // simple selection logic
                     const productLink = "https://partnerinaging.myshopify.com/products/" + product.handle;
+                    // Overwrite the assistantText with our function call result
                     assistantText = `I recommend **${product.title}**. Price: ${product.price} ${product.currency}. Check it out here: ${productLink}`;
                     console.log("Selected product:", product.title, "Link:", productLink);
                   }
@@ -179,11 +190,20 @@ export async function POST(
           } else {
             console.log("No tool call arguments accumulated.");
           }
+
           console.log("Final assistant text after processing:", assistantText);
           if (assistantText) {
+            // Enqueue the final assistant text to the stream so that the client receives it.
+            const finalChunk = new TextEncoder().encode(assistantText);
+            controller.enqueue(finalChunk);
+            // Append the final assistant message to the session history.
             await appendMessage(threadId, 'assistant', assistantText);
             console.log("Assistant message appended to session history.");
           }
+        } catch (parseError) {
+          console.error("Error processing assistant response data:", parseError);
+        } finally {
+          controller.close();
         }
       }
     });
