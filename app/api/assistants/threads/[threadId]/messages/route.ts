@@ -21,10 +21,13 @@ export async function OPTIONS() {
 /**
  * This version intercepts the streaming NDJSON output from OpenAI.
  * It accumulates JSON fragments (including function calls) and processes any tool call
- * by invoking the product API. Instead of picking the first product, it collects all
- * products and then appends the full list as additional information to the assistant's text.
- * Two final JSON chunks are sent ("final" and "run.complete"), and a short delay is included
- * before closing the stream.
+ * by invoking the product API. Instead of selecting a single product or simply appending
+ * the raw JSON product list, it builds a new prompt that includes the original user query
+ * and the full list of product options. That prompt is sent to ChatGPT to generate a natural
+ * language product recommendation.
+ *
+ * Two final JSON chunks are sent ("final" and "run.complete"). A longer delay (2000ms) is
+ * applied before appending the final assistant message, to help ensure the OpenAI run is fully finalized.
  */
 export async function POST(
   request: Request,
@@ -67,12 +70,12 @@ export async function POST(
     let assistantText = "";
     const reader = readable.getReader();
 
-    // Create a new intercepted stream that will include extra final markers.
+    // Create an intercepted stream that will include extra final markers.
     const interceptedStream = new ReadableStream({
       async start(controller) {
         try {
           console.log('Starting to read the streaming data...');
-          // Read all the streaming chunks.
+          // Read all streaming chunks.
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -114,7 +117,7 @@ export async function POST(
               }
             }
 
-            // Also check for a final requires_action event with tool call arguments.
+            // Also check for a final requires_action event that can provide tool call arguments.
             if (jsonObj.event === "thread.run.requires_action") {
               const requiredAction = jsonObj.data?.required_action;
               if (
@@ -131,7 +134,7 @@ export async function POST(
               }
             }
 
-            // Accumulate text responses from delta events.
+            // Accumulate text responses.
             if (jsonObj.event === "thread.message.delta") {
               const delta = jsonObj.data?.delta;
               if (delta) {
@@ -147,7 +150,7 @@ export async function POST(
               }
             }
 
-            // Also check for a final message event.
+            // Also capture final message event text.
             if (jsonObj.event === "thread.message") {
               const message = jsonObj.data?.message;
               if (message && message.content) {
@@ -156,7 +159,7 @@ export async function POST(
             }
           }
 
-          // Process tool call output if any tool call arguments were accumulated.
+          // If a tool call was detected, process it.
           if (toolCallAccumulator) {
             try {
               const parsedArgs = JSON.parse(toolCallAccumulator);
@@ -177,16 +180,37 @@ export async function POST(
                   const products = await productResponse.json();
                   console.log("Product API returned products, count:", products.length);
                   if (products && products.length > 0) {
-                    // Instead of selecting the first product, map all product data.
-                    const productInfo = products.map((product : any) => ({
+                    // Map through all products.
+                    const productInfo = products.map((product: any) => ({
                       title: product.title,
                       price: product.price,
                       currency: product.currency,
                       link: "https://partnerinaging.myshopify.com/products/" + product.handle
                     }));
-                    // Append the full product list information onto the assistant text.
-                    assistantText += "\n\nBased on your query, here are some product options:\n" + JSON.stringify(productInfo, null, 2);
-                    console.log("Appended product options:", productInfo);
+                    
+                    // Build a new prompt for ChatGPT that includes the original query and the product list.
+                    const additionalPrompt = `User query: "${content}"\n\nProduct options:\n${JSON.stringify(productInfo, null, 2)}\n\nBased on the product options above, provide a natural language recommendation that best matches the user's query.`;
+                    
+                    // Call ChatGPT to generate the final recommendation.
+                    const chatResponse = await openai.chat.completions.create({
+                      model: "gpt-4",
+                      messages: [
+                        {
+                          role: "system",
+                          content:
+`You are a product recommendation expert. Analyze the product options provided and generate a natural, friendly recommendation that best answers the user query.`,
+                        },
+                        { role: "user", content: additionalPrompt }
+                      ],
+                      temperature: 0.7,
+                    });
+                    
+                    const recommendation = chatResponse.choices[0].message.content;
+                    console.log("Product recommendation generated:", recommendation);
+                    // Only update assistantText if recommendation is not null.
+                    if (recommendation !== null) {
+                      assistantText = recommendation;
+                    }
                   }
                 }
               }
@@ -199,10 +223,12 @@ export async function POST(
 
           console.log("Final assistant text after processing:", assistantText);
           if (assistantText) {
-            // Enqueue a final chunk with the assistant text and product details as JSON.
+            // Enqueue a final chunk with the assistant text.
             const finalChunkObj = { event: "final", content: assistantText };
             const finalChunk = new TextEncoder().encode(JSON.stringify(finalChunkObj) + "\n");
             controller.enqueue(finalChunk);
+            // Wait 2000ms to help ensure the run is finalized.
+            await new Promise(resolve => setTimeout(resolve, 2000));
             // Append the final assistant message to the session history.
             await appendMessage(threadId, 'assistant', assistantText);
             console.log("Assistant message appended to session history.");
@@ -210,9 +236,6 @@ export async function POST(
           // Enqueue the final "run.complete" marker.
           const completeMarker = new TextEncoder().encode(JSON.stringify({ event: "run.complete" }) + "\n");
           controller.enqueue(completeMarker);
-
-          // Wait briefly to help ensure the run is finalized.
-          await new Promise(resolve => setTimeout(resolve, 500));
         } catch (parseError) {
           console.error("Error processing assistant response data:", parseError);
         } finally {
