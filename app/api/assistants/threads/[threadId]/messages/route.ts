@@ -20,11 +20,11 @@ export async function OPTIONS() {
 
 /**
  * This version intercepts the streaming NDJSON output from OpenAI.
- * It accumulates JSON fragments from delta events and checks for a final
- * "thread.run.requires_action" event to extract the complete function call arguments.
- * If any tool call arguments are detected, it calls the product API and uses its output.
- * Finally, it appends the assistant’s response to the session history and sends two final output chunks:
- * one with the final text (event "final") and one marker (event "run.complete").
+ * It accumulates JSON fragments (including function calls) and processes any tool call
+ * by invoking the product API. Instead of picking the first product, it collects all
+ * products and then appends the full list as additional information to the assistant's text.
+ * Two final JSON chunks are sent ("final" and "run.complete"), and a short delay is included
+ * before closing the stream.
  */
 export async function POST(
   request: Request,
@@ -67,19 +67,19 @@ export async function POST(
     let assistantText = "";
     const reader = readable.getReader();
 
-    // Create a new intercepted stream that will include final markers.
+    // Create a new intercepted stream that will include extra final markers.
     const interceptedStream = new ReadableStream({
       async start(controller) {
         try {
           console.log('Starting to read the streaming data...');
-          // Read all the streaming chunks
+          // Read all the streaming chunks.
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             const chunk = decoder.decode(value, { stream: true });
             console.log('Received chunk:', chunk);
             fullResponseData += chunk;
-            // Forward the raw chunk immediately to the client
+            // Immediately forward the raw chunk to the client.
             controller.enqueue(value);
           }
         } catch (err) {
@@ -100,7 +100,7 @@ export async function POST(
               continue;
             }
 
-            // Check for delta tool_calls fragments.
+            // Accumulate fragments from tool_calls.
             if (jsonObj.choices && jsonObj.choices[0]?.delta?.tool_calls) {
               const toolCalls = jsonObj.choices[0].delta.tool_calls;
               for (const tc of toolCalls) {
@@ -114,7 +114,7 @@ export async function POST(
               }
             }
 
-            // Check for a final requires_action event which contains complete tool call arguments.
+            // Also check for a final requires_action event with tool call arguments.
             if (jsonObj.event === "thread.run.requires_action") {
               const requiredAction = jsonObj.data?.required_action;
               if (
@@ -131,7 +131,7 @@ export async function POST(
               }
             }
 
-            // Accumulate normal text responses from delta events.
+            // Accumulate text responses from delta events.
             if (jsonObj.event === "thread.message.delta") {
               const delta = jsonObj.data?.delta;
               if (delta) {
@@ -156,7 +156,7 @@ export async function POST(
             }
           }
 
-          // If tool call arguments were accumulated, process them.
+          // Process tool call output if any tool call arguments were accumulated.
           if (toolCallAccumulator) {
             try {
               const parsedArgs = JSON.parse(toolCallAccumulator);
@@ -177,11 +177,16 @@ export async function POST(
                   const products = await productResponse.json();
                   console.log("Product API returned products, count:", products.length);
                   if (products && products.length > 0) {
-                    const product = products[0]; // simple selection logic
-                    const productLink = "https://partnerinaging.myshopify.com/products/" + product.handle;
-                    // Overwrite the assistantText with our function call result
-                    assistantText = `I recommend **${product.title}**. Price: ${product.price} ${product.currency}. Check it out here: ${productLink}`;
-                    console.log("Selected product:", product.title, "Link:", productLink);
+                    // Instead of selecting the first product, map all product data.
+                    const productInfo = products.map((product : any) => ({
+                      title: product.title,
+                      price: product.price,
+                      currency: product.currency,
+                      link: "https://partnerinaging.myshopify.com/products/" + product.handle
+                    }));
+                    // Append the full product list information onto the assistant text.
+                    assistantText += "\n\nBased on your query, here are some product options:\n" + JSON.stringify(productInfo, null, 2);
+                    console.log("Appended product options:", productInfo);
                   }
                 }
               }
@@ -194,24 +199,23 @@ export async function POST(
 
           console.log("Final assistant text after processing:", assistantText);
           if (assistantText) {
-            // Enqueue a final chunk with the final text as JSON.
-            const finalChunkObj = {
-              event: "final",
-              content: assistantText
-            };
+            // Enqueue a final chunk with the assistant text and product details as JSON.
+            const finalChunkObj = { event: "final", content: assistantText };
             const finalChunk = new TextEncoder().encode(JSON.stringify(finalChunkObj) + "\n");
             controller.enqueue(finalChunk);
             // Append the final assistant message to the session history.
             await appendMessage(threadId, 'assistant', assistantText);
             console.log("Assistant message appended to session history.");
           }
-          // Enqueue a final "run complete" marker so the frontend knows the run is finished.
+          // Enqueue the final "run.complete" marker.
           const completeMarker = new TextEncoder().encode(JSON.stringify({ event: "run.complete" }) + "\n");
           controller.enqueue(completeMarker);
+
+          // Wait briefly to help ensure the run is finalized.
+          await new Promise(resolve => setTimeout(resolve, 500));
         } catch (parseError) {
           console.error("Error processing assistant response data:", parseError);
         } finally {
-          // Only close the controller after final markers are sent.
           controller.close();
         }
       }
