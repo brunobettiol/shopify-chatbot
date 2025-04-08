@@ -23,7 +23,8 @@ export async function OPTIONS() {
  * It accumulates JSON fragments from delta events and checks for a final
  * "thread.run.requires_action" event to extract the complete function call arguments.
  * If any tool call arguments are detected, it calls the product API and uses its output.
- * Finally, it appends the assistant’s response to the session history and sends a final output chunk.
+ * Finally, it appends the assistant’s response to the session history and sends two final output chunks:
+ * one with the final text (event "final") and one marker (event "run.complete").
  */
 export async function POST(
   request: Request,
@@ -66,7 +67,7 @@ export async function POST(
     let assistantText = "";
     const reader = readable.getReader();
 
-    // Create a new intercepted stream that will include a final chunk (if necessary)
+    // Create a new intercepted stream that will include final markers.
     const interceptedStream = new ReadableStream({
       async start(controller) {
         try {
@@ -193,16 +194,24 @@ export async function POST(
 
           console.log("Final assistant text after processing:", assistantText);
           if (assistantText) {
-            // Enqueue the final assistant text to the stream so that the client receives it.
-            const finalChunk = new TextEncoder().encode(assistantText);
+            // Enqueue a final chunk with the final text as JSON.
+            const finalChunkObj = {
+              event: "final",
+              content: assistantText
+            };
+            const finalChunk = new TextEncoder().encode(JSON.stringify(finalChunkObj) + "\n");
             controller.enqueue(finalChunk);
             // Append the final assistant message to the session history.
             await appendMessage(threadId, 'assistant', assistantText);
             console.log("Assistant message appended to session history.");
           }
+          // Enqueue a final "run complete" marker so the frontend knows the run is finished.
+          const completeMarker = new TextEncoder().encode(JSON.stringify({ event: "run.complete" }) + "\n");
+          controller.enqueue(completeMarker);
         } catch (parseError) {
           console.error("Error processing assistant response data:", parseError);
         } finally {
+          // Only close the controller after final markers are sent.
           controller.close();
         }
       }
