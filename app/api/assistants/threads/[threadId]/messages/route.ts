@@ -27,8 +27,8 @@ export async function OPTIONS() {
  * language product recommendation.
  *
  * Two final JSON chunks are sent ("final" and "run.complete"). A longer delay (2000ms) is
- * applied before appending the final assistant message, to help ensure the OpenAI run is fully finalized.
- * After generating the final recommendation, any active run (identified by runId) is terminated.
+ * applied before appending the final assistant message to help ensure the OpenAI run is fully finalized.
+ * After generating the final recommendation, if available, the active run is cancelled using the cancel method.
  */
 export async function POST(
   request: Request,
@@ -69,7 +69,7 @@ export async function POST(
     let toolCallAccumulator = "";
     let toolCallId: string | null = null;
     let assistantText = "";
-    // New variable to store run ID.
+    // Variable to capture run ID.
     let runId: string | null = null;
     const reader = readable.getReader();
 
@@ -220,14 +220,16 @@ export async function POST(
                     if (recommendation !== null) {
                       assistantText = recommendation;
                     }
-                    // Terminate the active run if possible.
-                    if (runId) {
+                    // If available, cancel the active run.
+                    if (runId && typeof (openai.beta.threads.runs as any).cancel === "function") {
                       try {
-                        await openai.beta.threads.runs.terminate(threadId, runId);
-                        console.log("Active run terminated successfully.");
-                      } catch (terminationError) {
-                        console.error("Error terminating the active run:", terminationError);
+                        await (openai.beta.threads.runs as any).cancel(threadId, runId);
+                        console.log("Active run cancelled successfully.");
+                      } catch (cancellationError) {
+                        console.error("Error cancelling the active run:", cancellationError);
                       }
+                    } else {
+                      console.log("Cancel method not available; skipping cancellation.");
                     }
                   }
                 }
