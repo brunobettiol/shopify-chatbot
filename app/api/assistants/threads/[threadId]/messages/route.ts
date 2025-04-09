@@ -21,14 +21,15 @@ export async function OPTIONS() {
 /**
  * This version intercepts the streaming NDJSON output from OpenAI.
  * It accumulates JSON fragments (including function calls) and processes any tool call
- * by invoking the product API. Instead of selecting a single product or simply appending
- * the raw JSON product list, it builds a new prompt that includes the original user query
- * and a bullet-point list of product options (with correctly formatted prices).
- * That prompt is sent to ChatGPT to generate a natural language product recommendation.
+ * by invoking the product API. Instead of simply appending a JSON dump of all products,
+ * it builds a concise prompt that includes the original user query and a bullet‑point list
+ * of product options (with formatted prices). That prompt is sent to ChatGPT to generate
+ * a natural language product recommendation.
  *
- * The final recommendation is streamed word by word with a short delay to mimic normal streaming.
- * After generating the final recommendation, if available, the active run is cancelled.
- * Finally, a "run.complete" marker is enqueued.
+ * Finally, a single final JSON chunk containing the recommendation is streamed,
+ * and the final recommendation is appended to the session history.
+ * After that, if available, the active run is cancelled using the cancel method.
+ * A "run.complete" marker is also enqueued.
  */
 export async function POST(
   request: Request,
@@ -40,7 +41,7 @@ export async function POST(
     const { content } = await request.json();
     console.log(`User message received: ${content}`);
 
-    // Save the user's message to the session history.
+    // Save the user's message to session history.
     await appendMessage(threadId, 'user', content);
     console.log('User message appended to session history.');
 
@@ -63,17 +64,16 @@ export async function POST(
     } else {
       readable = (stream as unknown) as ReadableStream<any>;
     }
-
     const decoder = new TextDecoder();
     let fullResponseData = "";
     let toolCallAccumulator = "";
     let toolCallId: string | null = null;
     let assistantText = "";
-    // Variable to capture the run ID.
+    // Variable to capture run ID.
     let runId: string | null = null;
     const reader = readable.getReader();
 
-    // Create an intercepted stream to add extra final markers.
+    // Create an intercepted stream for extra final markers.
     const interceptedStream = new ReadableStream({
       async start(controller) {
         try {
@@ -92,7 +92,7 @@ export async function POST(
           console.error("Error reading assistant stream:", err);
           controller.error(err);
         }
-        // Process the full streaming data after reading is complete.
+        // Process the full streaming data.
         try {
           const lines = fullResponseData.split("\n").filter(line => line.trim() !== "");
           console.log(`Total lines received: ${lines.length}`);
@@ -105,13 +105,11 @@ export async function POST(
               console.error("Error parsing JSON line:", e, line);
               continue;
             }
-
-            // Capture the run ID from "thread.run.created" event.
+            // Capture the run ID.
             if (!runId && jsonObj.event === "thread.run.created" && jsonObj.data?.id) {
               runId = jsonObj.data.id;
               console.log("Captured runId:", runId);
             }
-
             // Accumulate fragments from tool_calls.
             if (jsonObj.choices && jsonObj.choices[0]?.delta?.tool_calls) {
               const toolCalls = jsonObj.choices[0].delta.tool_calls;
@@ -125,13 +123,10 @@ export async function POST(
                 }
               }
             }
-
-            // Check for a final requires_action event.
+            // Also check for final requires_action event.
             if (jsonObj.event === "thread.run.requires_action") {
               const requiredAction = jsonObj.data?.required_action;
-              if (requiredAction &&
-                  requiredAction.submit_tool_outputs &&
-                  Array.isArray(requiredAction.submit_tool_outputs.tool_calls)) {
+              if (requiredAction && requiredAction.submit_tool_outputs && Array.isArray(requiredAction.submit_tool_outputs.tool_calls)) {
                 for (const call of requiredAction.submit_tool_outputs.tool_calls) {
                   if (call.function && call.function.arguments) {
                     toolCallAccumulator += call.function.arguments;
@@ -140,7 +135,6 @@ export async function POST(
                 }
               }
             }
-
             // Accumulate text responses.
             if (jsonObj.event === "thread.message.delta") {
               const delta = jsonObj.data?.delta;
@@ -156,7 +150,6 @@ export async function POST(
                 }
               }
             }
-
             // Capture final message text.
             if (jsonObj.event === "thread.message") {
               const message = jsonObj.data?.message;
@@ -165,8 +158,8 @@ export async function POST(
               }
             }
           }
-
-          // If a tool call was detected, process it.
+          
+          // Process tool call if detected.
           if (toolCallAccumulator) {
             try {
               const parsedArgs = JSON.parse(toolCallAccumulator);
@@ -187,19 +180,18 @@ export async function POST(
                   const products = await productResponse.json();
                   console.log("Product API returned products, count:", products.length);
                   if (products && products.length > 0) {
-                    // Format product prices correctly (assume price is given in cents).
+                    // Format the product price properly (assuming raw price is in cents).
                     const productInfo = products.map((product: any) => ({
                       title: product.title,
                       price: (parseFloat(product.price) / 100).toFixed(2),
                       currency: product.currency,
                       link: "https://partnerinaging.myshopify.com/products/" + product.handle
                     }));
-                    
-                    // Build a concise bullet list of product options.
+                    // Build a bullet list of product options.
                     const bulletList = productInfo
                       .map((p: any) => `• ${p.title}: ${p.price} ${p.currency} ([Buy Here](${p.link}))`)
                       .join("\n");
-                    const additionalPrompt = `User query: "${content}"\n\nI found the following product options:\n${bulletList}\n\nBased on these options, please provide a concise and natural language recommendation for the best matching product.`;
+                    const additionalPrompt = `User query: "${content}"\n\nI found the following product options:\n${bulletList}\n\nBased on these options, please provide a concise and natural language recommendation for the best matching product. Note: Use the provided prices exactly as listed.`;
                     
                     // Call ChatGPT to generate the final recommendation.
                     const chatResponse = await openai.chat.completions.create({
@@ -208,7 +200,7 @@ export async function POST(
                         {
                           role: "system",
                           content:
-`You are a product recommendation expert. Analyze the product options provided and generate a natural, friendly recommendation that best answers the user query.`,
+`You are a product recommendation expert. Analyze the product options provided and generate a natural, friendly recommendation that best answers the user's query.`,
                         },
                         { role: "user", content: additionalPrompt }
                       ],
@@ -220,7 +212,7 @@ export async function POST(
                     if (recommendation !== null) {
                       assistantText = recommendation;
                     }
-                    // Cancel the active run if cancel method is available.
+                    // Cancel the active run if possible.
                     if (runId && typeof (openai.beta.threads.runs as any).cancel === "function") {
                       try {
                         await (openai.beta.threads.runs as any).cancel(threadId, runId);
@@ -240,23 +232,16 @@ export async function POST(
           } else {
             console.log("No tool call arguments accumulated.");
           }
-
+          
           console.log("Final assistant text after processing:", assistantText);
           if (assistantText) {
-            // Stream the final recommendation word by word.
-            const words = assistantText.split(' ');
-            let accumulated = "";
-            for (const word of words) {
-              accumulated += word + " ";
-              const chunkObj = { event: "final", content: accumulated.trim() };
-              const chunk = new TextEncoder().encode(JSON.stringify(chunkObj) + "\n");
-              controller.enqueue(chunk);
-              // Delay to simulate streaming.
-              await new Promise(resolve => setTimeout(resolve, 50));
-            }
-            // Wait an additional 2000ms.
+            // Enqueue a single final chunk with the assistant text.
+            const finalChunkObj = { event: "final", content: assistantText };
+            const finalChunk = new TextEncoder().encode(JSON.stringify(finalChunkObj) + "\n");
+            controller.enqueue(finalChunk);
+            // Wait 2000ms to help ensure the run is fully finalized.
             await new Promise(resolve => setTimeout(resolve, 2000));
-            // Append the final assistant message to session history.
+            // Append the final assistant message to the session history.
             await appendMessage(threadId, 'assistant', assistantText);
             console.log("Assistant message appended to session history.");
           }
@@ -270,7 +255,7 @@ export async function POST(
         }
       }
     });
-
+    
     return new NextResponse(interceptedStream, {
       headers: {
         'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
