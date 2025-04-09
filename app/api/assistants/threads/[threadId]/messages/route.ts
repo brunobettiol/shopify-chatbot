@@ -22,14 +22,13 @@ export async function OPTIONS() {
  * This version intercepts the streaming NDJSON output from OpenAI.
  * It accumulates JSON fragments (including function calls) and processes any tool call
  * by invoking the product API. Instead of selecting a single product or simply appending
- * a raw JSON product list, it builds a new prompt that includes the original user query
- * and a bullet-point list of product options. That prompt is sent to ChatGPT to generate
- * a natural language product recommendation. The final recommendation is then streamed
- * in the usual way.
+ * the raw JSON product list, it builds a new prompt that includes the original user query
+ * and a bullet-point list of product options (with correctly formatted prices).
+ * That prompt is sent to ChatGPT to generate a natural language product recommendation.
  *
- * Two final JSON chunks are sent ("final" and "run.complete"). A longer delay (2000ms)
- * is applied before appending the final assistant message to help ensure the OpenAI run is
- * fully finalized. After the final recommendation is generated, the active run is cancelled.
+ * The final recommendation is streamed word by word with a short delay to mimic normal streaming.
+ * After generating the final recommendation, if available, the active run is cancelled.
+ * Finally, a "run.complete" marker is enqueued.
  */
 export async function POST(
   request: Request,
@@ -70,15 +69,15 @@ export async function POST(
     let toolCallAccumulator = "";
     let toolCallId: string | null = null;
     let assistantText = "";
-    // Variable to capture run ID.
+    // Variable to capture the run ID.
     let runId: string | null = null;
     const reader = readable.getReader();
 
-    // Create an intercepted stream that will include extra final markers.
+    // Create an intercepted stream to add extra final markers.
     const interceptedStream = new ReadableStream({
       async start(controller) {
         try {
-          console.log('Starting to read the streaming data...');
+          console.log('Starting to read streaming data...');
           // Read all streaming chunks.
           while (true) {
             const { done, value } = await reader.read();
@@ -86,7 +85,7 @@ export async function POST(
             const chunk = decoder.decode(value, { stream: true });
             console.log('Received chunk:', chunk);
             fullResponseData += chunk;
-            // Immediately forward the raw chunk to the client.
+            // Immediately forward the raw chunk.
             controller.enqueue(value);
           }
         } catch (err) {
@@ -107,7 +106,7 @@ export async function POST(
               continue;
             }
 
-            // Capture the run ID when the run is created.
+            // Capture the run ID from "thread.run.created" event.
             if (!runId && jsonObj.event === "thread.run.created" && jsonObj.data?.id) {
               runId = jsonObj.data.id;
               console.log("Captured runId:", runId);
@@ -127,14 +126,12 @@ export async function POST(
               }
             }
 
-            // Also check for a final requires_action event that can provide tool call arguments.
+            // Check for a final requires_action event.
             if (jsonObj.event === "thread.run.requires_action") {
               const requiredAction = jsonObj.data?.required_action;
-              if (
-                requiredAction &&
-                requiredAction.submit_tool_outputs &&
-                Array.isArray(requiredAction.submit_tool_outputs.tool_calls)
-              ) {
+              if (requiredAction &&
+                  requiredAction.submit_tool_outputs &&
+                  Array.isArray(requiredAction.submit_tool_outputs.tool_calls)) {
                 for (const call of requiredAction.submit_tool_outputs.tool_calls) {
                   if (call.function && call.function.arguments) {
                     toolCallAccumulator += call.function.arguments;
@@ -160,7 +157,7 @@ export async function POST(
               }
             }
 
-            // Also capture final message event text.
+            // Capture final message text.
             if (jsonObj.event === "thread.message") {
               const message = jsonObj.data?.message;
               if (message && message.content) {
@@ -190,19 +187,19 @@ export async function POST(
                   const products = await productResponse.json();
                   console.log("Product API returned products, count:", products.length);
                   if (products && products.length > 0) {
-                    // Map through all products.
+                    // Format product prices correctly (assume price is given in cents).
                     const productInfo = products.map((product: any) => ({
                       title: product.title,
-                      price: product.price,
+                      price: (parseFloat(product.price) / 100).toFixed(2),
                       currency: product.currency,
                       link: "https://partnerinaging.myshopify.com/products/" + product.handle
                     }));
                     
-                    // Build a new prompt using a concise, natural language format.
+                    // Build a concise bullet list of product options.
                     const bulletList = productInfo
                       .map((p: any) => `• ${p.title}: ${p.price} ${p.currency} ([Buy Here](${p.link}))`)
                       .join("\n");
-                    const additionalPrompt = `User query: "${content}"\n\nI found the following product options:\n${bulletList}\n\nBased on the above options, please provide a concise and natural language recommendation for the best matching product.`;
+                    const additionalPrompt = `User query: "${content}"\n\nI found the following product options:\n${bulletList}\n\nBased on these options, please provide a concise and natural language recommendation for the best matching product.`;
                     
                     // Call ChatGPT to generate the final recommendation.
                     const chatResponse = await openai.chat.completions.create({
@@ -220,11 +217,10 @@ export async function POST(
                     
                     const recommendation = chatResponse.choices[0].message.content;
                     console.log("Product recommendation generated:", recommendation);
-                    // Only update assistantText if recommendation is not null.
                     if (recommendation !== null) {
                       assistantText = recommendation;
                     }
-                    // Cancel the active run if the cancel method is available.
+                    // Cancel the active run if cancel method is available.
                     if (runId && typeof (openai.beta.threads.runs as any).cancel === "function") {
                       try {
                         await (openai.beta.threads.runs as any).cancel(threadId, runId);
@@ -247,13 +243,20 @@ export async function POST(
 
           console.log("Final assistant text after processing:", assistantText);
           if (assistantText) {
-            // Enqueue a final chunk with the assistant text.
-            const finalChunkObj = { event: "final", content: assistantText };
-            const finalChunk = new TextEncoder().encode(JSON.stringify(finalChunkObj) + "\n");
-            controller.enqueue(finalChunk);
-            // Wait 2000ms to help ensure the run is finalized.
+            // Stream the final recommendation word by word.
+            const words = assistantText.split(' ');
+            let accumulated = "";
+            for (const word of words) {
+              accumulated += word + " ";
+              const chunkObj = { event: "final", content: accumulated.trim() };
+              const chunk = new TextEncoder().encode(JSON.stringify(chunkObj) + "\n");
+              controller.enqueue(chunk);
+              // Delay to simulate streaming.
+              await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            // Wait an additional 2000ms.
             await new Promise(resolve => setTimeout(resolve, 2000));
-            // Append the final assistant message to the session history.
+            // Append the final assistant message to session history.
             await appendMessage(threadId, 'assistant', assistantText);
             console.log("Assistant message appended to session history.");
           }
