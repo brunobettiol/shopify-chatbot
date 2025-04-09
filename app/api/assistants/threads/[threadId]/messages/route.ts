@@ -28,6 +28,7 @@ export async function OPTIONS() {
  *
  * Two final JSON chunks are sent ("final" and "run.complete"). A longer delay (2000ms) is
  * applied before appending the final assistant message, to help ensure the OpenAI run is fully finalized.
+ * After generating the final recommendation, any active run (identified by runId) is terminated.
  */
 export async function POST(
   request: Request,
@@ -68,6 +69,8 @@ export async function POST(
     let toolCallAccumulator = "";
     let toolCallId: string | null = null;
     let assistantText = "";
+    // New variable to store run ID.
+    let runId: string | null = null;
     const reader = readable.getReader();
 
     // Create an intercepted stream that will include extra final markers.
@@ -101,6 +104,12 @@ export async function POST(
             } catch (e) {
               console.error("Error parsing JSON line:", e, line);
               continue;
+            }
+
+            // Capture the run ID when the run is created.
+            if (!runId && jsonObj.event === "thread.run.created" && jsonObj.data?.id) {
+              runId = jsonObj.data.id;
+              console.log("Captured runId:", runId);
             }
 
             // Accumulate fragments from tool_calls.
@@ -210,6 +219,15 @@ export async function POST(
                     // Only update assistantText if recommendation is not null.
                     if (recommendation !== null) {
                       assistantText = recommendation;
+                    }
+                    // Terminate the active run if possible.
+                    if (runId) {
+                      try {
+                        await openai.beta.threads.runs.terminate(threadId, runId);
+                        console.log("Active run terminated successfully.");
+                      } catch (terminationError) {
+                        console.error("Error terminating the active run:", terminationError);
+                      }
                     }
                   }
                 }
