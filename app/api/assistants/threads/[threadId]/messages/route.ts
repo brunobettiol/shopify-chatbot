@@ -22,13 +22,14 @@ export async function OPTIONS() {
  * This version intercepts the streaming NDJSON output from OpenAI.
  * It accumulates JSON fragments (including function calls) and processes any tool call
  * by invoking the product API. Instead of selecting a single product or simply appending
- * the raw JSON product list, it builds a new prompt that includes the original user query
- * and the full list of product options. That prompt is sent to ChatGPT to generate a natural
- * language product recommendation.
+ * a raw JSON product list, it builds a new prompt that includes the original user query
+ * and a bullet-point list of product options. That prompt is sent to ChatGPT to generate
+ * a natural language product recommendation. The final recommendation is then streamed
+ * in the usual way.
  *
- * Two final JSON chunks are sent ("final" and "run.complete"). A longer delay (2000ms) is
- * applied before appending the final assistant message to help ensure the OpenAI run is fully finalized.
- * After generating the final recommendation, if available, the active run is cancelled using the cancel method.
+ * Two final JSON chunks are sent ("final" and "run.complete"). A longer delay (2000ms)
+ * is applied before appending the final assistant message to help ensure the OpenAI run is
+ * fully finalized. After the final recommendation is generated, the active run is cancelled.
  */
 export async function POST(
   request: Request,
@@ -197,8 +198,11 @@ export async function POST(
                       link: "https://partnerinaging.myshopify.com/products/" + product.handle
                     }));
                     
-                    // Build a new prompt for ChatGPT that includes the original query and the product list.
-                    const additionalPrompt = `User query: "${content}"\n\nProduct options:\n${JSON.stringify(productInfo, null, 2)}\n\nBased on the product options above, provide a natural language recommendation that best matches the user's query.`;
+                    // Build a new prompt using a concise, natural language format.
+                    const bulletList = productInfo
+                      .map((p: any) => `• ${p.title}: ${p.price} ${p.currency} ([Buy Here](${p.link}))`)
+                      .join("\n");
+                    const additionalPrompt = `User query: "${content}"\n\nI found the following product options:\n${bulletList}\n\nBased on the above options, please provide a concise and natural language recommendation for the best matching product.`;
                     
                     // Call ChatGPT to generate the final recommendation.
                     const chatResponse = await openai.chat.completions.create({
@@ -220,7 +224,7 @@ export async function POST(
                     if (recommendation !== null) {
                       assistantText = recommendation;
                     }
-                    // If available, cancel the active run.
+                    // Cancel the active run if the cancel method is available.
                     if (runId && typeof (openai.beta.threads.runs as any).cancel === "function") {
                       try {
                         await (openai.beta.threads.runs as any).cancel(threadId, runId);
