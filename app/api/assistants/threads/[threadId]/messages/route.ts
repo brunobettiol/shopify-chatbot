@@ -189,7 +189,7 @@ export async function POST(
                     }));
                     // Build a bullet list of product options.
                     const bulletList = productInfo
-                      .map((p: any) => `• ${p.title}: ${p.price} ${p.currency} ([Buy Here](${p.link}))`)
+                      .map((p: any) => `• ${p.title}: ${p.price} ${p.currency} (<a href="${p.link}" target="_blank" rel="noopener noreferrer">Buy Here</a>)`)
                       .join("\n");
                     const additionalPrompt = `User query: "${content}"\n\nI found the following product options:\n${bulletList}\n\nBased on these options, please provide a concise and natural language recommendation for the best matching product. Note: Use the provided prices exactly as listed.`;
                     
@@ -200,7 +200,7 @@ export async function POST(
                         {
                           role: "system",
                           content:
-`You are a product recommendation expert. Analyze the product options provided and generate a natural, friendly recommendation that best answers the user's query.`,
+`You are a product recommendation expert. Analyze the product options provided and generate a natural, friendly recommendation that best answers the user's query. Please ensure that any product purchase links in your recommendation are embedded as clickable HTML <a> tags.`,
                         },
                         { role: "user", content: additionalPrompt }
                       ],
