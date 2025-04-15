@@ -191,8 +191,8 @@ export async function POST(
                     const bulletList = productInfo
                       .map((p: any) => `• ${p.title}: ${p.price} ${p.currency} (<a href="${p.link}" target="_blank" rel="noopener noreferrer">Buy Here</a>)`)
                       .join("\n");
-                    const additionalPrompt = `User query: "${content}"\n\nI found the following product options:\n${bulletList}\n\nBased on these options, please provide a concise and natural language recommendation for the best matching product. Note: Use the provided prices exactly as listed.`;
-                    
+                    const additionalPrompt = `User query: "${content}"\n\nI found the following product options:\n${bulletList}\n\nBased on these options, please provide a concise and natural language recommendation for the best matching product. Note: Use the provided prices exactly as listed, and format all prices with the "$" symbol at the beginning — do not include "USD" or place the currency at the end.`;
+
                     // Call ChatGPT to generate the final recommendation.
                     const chatResponse = await openai.chat.completions.create({
                       model: "gpt-4",
